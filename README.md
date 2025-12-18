@@ -22,6 +22,14 @@ pip install scanpy pyvips scikit-image matplotlib
 ```
 > If you get `ImportError: no module named 'pyvips'` or similar, make sure system `libvips` is installed (e.g. via `apt`, `yum`, or `brew`).
 
+### 1.1 Pretrained HoVer-Net weights
+
+The file `hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar` is too large for GitHub (>100 MB), so it is **not** included in this repository.
+
+Please download it from the original HoVer-Net links and place it here:
+
+    hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar
+
 ---
 
 # 2. Directory structure
