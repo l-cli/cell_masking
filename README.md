@@ -30,7 +30,7 @@ Please download them from the official HoVer-Net repository: [HoVer-Net GitHub â
 
 ---
 
-# 2. Directory structure
+## 2. Directory structure
 
 ```text
 cell_masking
@@ -101,6 +101,8 @@ cell_masking
   )
 
 ---
+
+## 4. How to run on a new dataset
 
 ### Step 0 â€“ Required inputs
 
