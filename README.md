@@ -32,6 +32,7 @@ Please download them from the official HoVer-Net repository: [HoVer-Net GitHub �
 
 # 2. Directory structure
 
+```text
 cell_masking
 ├── README.md # this file
 ├── hover_net/ # contains the original hover_net modules. Do not change scripts in this part.
@@ -46,6 +47,7 @@ cell_masking
     ├── run_expansion.sh               # example script to call expand_hovernet_cells.py
     ├── plot_clusters_on_cell_masks.py    # plotting library
     └── run_plot_cell_masks_example.py    # example script to call plot_clusters_on_cell_masks.py
+```
 
 ---
 
