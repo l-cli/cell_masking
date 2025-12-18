@@ -26,9 +26,7 @@ pip install scanpy pyvips scikit-image matplotlib
 
 The file `hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar` is too large for GitHub (>100 MB), so it is **not** included in this repository.
 
-Please download it from the original HoVer-Net links [here] (https://drive.google.com/file/d/1KntZge40tAHgyXmHYVqZZ5d2p_4Qr2l5/view?pli=1) and place it in the following path:
-
-    hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar
+Please download them from the official HoVer-Net repository: [HoVer-Net GitHub – Model Weights](https://drive.google.com/file/d/1KntZge40tAHgyXmHYVqZZ5d2p_4Qr2l5/view?pli=1) and place it in the following path: hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar
 
 ---
 
