@@ -6,14 +6,14 @@ set -euo pipefail
 # ==========================================================================================================
 # Change this part to reflect your CATCH result path + where you want to output the masks
 # ==========================================================================================================
-SAMPLE_NAME="Xenium_Prime_Cervical_Cancer_FFPE_he_image"
+SAMPLE_NAME="P24_LUAD_Visium"
 GPU_ID="0"
 
 # Path to the WSI (H&E) image
-INPUT_IMG="/project/CATCH/dataset/10x_cervical_cancer/${SAMPLE_NAME}/he_raw.tif"
+INPUT_IMG="/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_multi_55_samples/${SAMPLE_NAME}/he.tiff"
 
 # Where to store tiles + HoVer-Net outputs (json/mat/overlays)
-BASE_OUT_DIR="/project/CATCH/dataset/for_hovernet/hovernet_results_lm"
+BASE_OUT_DIR="/project/CATCH/lexi/hovernet_results"
 
 # Optional: change model / nr_types / type_info.json for your dataset
 MODEL_PATH="./pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar"
@@ -23,7 +23,7 @@ TYPE_INFO_JSON="type_info.json"
 # ========================================================
 # usually no need to edit this part 
 # ========================================================
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 TILE_DIR="${BASE_OUT_DIR}/tiles/${SAMPLE_NAME}"
@@ -59,14 +59,14 @@ fi
 
 # --- STEP 1: TILING ---
 echo "Step 1: Tiling..." | tee -a "$LOG_FILE"
-run_and_log python wsi_utils.py tile \
+run_and_log python hover_net/wsi_utils.py tile \
     --input "$INPUT_IMG" \
     --out_dir "$TILE_DIR" \
     --dims_out "$DIMS_FILE"
 
 # --- STEP 2: HOVERNET INFERENCE (WSI via tiles) ---
 echo "Step 2: Running HoVer-Net Inference..." | tee -a "$LOG_FILE"
-run_and_log python run_infer.py \
+run_and_log python hover_net/run_infer.py \
     --gpu="$GPU_ID" \
     --nr_types="$NR_TYPES" \
     --type_info_path="$TYPE_INFO_JSON" \
@@ -84,20 +84,20 @@ run_and_log python run_infer.py \
 
 # --- STEP 3: CONVERT MAT -> TILE MASKS ---
 echo "Step 3: Converting .mat -> tile masks..." | tee -a "$LOG_FILE"
-run_and_log python wsi_utils.py mats \
+run_and_log python hover_net/wsi_utils.py mats \
     --mat_dir "$MAT_DIR" \
     --mask_out_dir "$BINARY_MASK_TILE_DIR"
 
 # --- STEP 4: STITCH FINAL WHOLE-SLIDE MASK + OVERLAY ---
 echo "Step 4: Stitching final mask + overlay..." | tee -a "$LOG_FILE"
 
-run_and_log python wsi_utils.py stitch \
+run_and_log python hover_net/wsi_utils.py stitch \
     --tile_dir "$BINARY_MASK_TILE_DIR" \
     --output "$FINAL_MASK_PATH" \
     --mode "L" \
     --dims_file "$DIMS_FILE"
 
-run_and_log python wsi_utils.py stitch \
+run_and_log python hover_net/wsi_utils.py stitch \
     --tile_dir "$OVERLAY_TILE_DIR" \
     --output "$FINAL_OVERLAY_PATH" \
     --mode "RGB" \
