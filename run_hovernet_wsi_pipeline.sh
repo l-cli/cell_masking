@@ -16,9 +16,9 @@ INPUT_IMG="/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_
 BASE_OUT_DIR="/project/CATCH/lexi/hovernet_results"
 
 # Optional: change model / nr_types / type_info.json for your dataset
-MODEL_PATH="./pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar"
+MODEL_PATH="hover_net/pretrained/hovernet_fast_pannuke_type_tf2pytorch.tar"
 NR_TYPES=6
-TYPE_INFO_JSON="type_info.json"
+TYPE_INFO_JSON="hover_net/type_info.json"
 
 # ========================================================
 # usually no need to edit this part 
