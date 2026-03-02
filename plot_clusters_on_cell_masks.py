@@ -35,7 +35,7 @@ import scanpy as sc
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 try:
     import pyvips
@@ -189,6 +189,73 @@ def _save_with_matplotlib(pil_img, out_base, formats, dpi, face_rgb01):
     plt.close(fig)
     return saved_paths
 
+
+def _ensure_vips_rgb_u8(vimg: "pyvips.Image") -> "pyvips.Image":
+    """Ensure vips image is 3-band uint8 RGB."""
+    if vimg.bands > 3:
+        vimg = vimg[0:3]
+    elif vimg.bands == 1:
+        vimg = vimg.bandjoin([vimg, vimg, vimg])
+
+    # Convert to uchar if needed
+    if vimg.format != "uchar":
+        vimg = vimg.cast("uchar")
+    return vimg
+
+
+def _vips_to_pil_rgb(vimg: "pyvips.Image") -> Image.Image:
+    """Convert a (small-ish) vips RGB uchar image to PIL.Image."""
+    vimg = _ensure_vips_rgb_u8(vimg)
+    mem = vimg.write_to_memory()
+    arr = np.frombuffer(mem, dtype=np.uint8).reshape(vimg.height, vimg.width, vimg.bands)
+    return Image.fromarray(arr, mode="RGB")
+
+
+def _scale_polygon_xy(poly_yx: np.ndarray, scale: float):
+    """
+    poly_yx: (M,2) in (y,x) full-res.
+    returns list[(x,y)] scaled for PIL drawing in downsampled space.
+    """
+    if poly_yx.size == 0:
+        return []
+    # (y,x) -> (x,y), scaled
+    return [(float(x) * scale, float(y) * scale) for (y, x) in poly_yx]
+
+
+def _labels_equal(a, b) -> bool:
+    """Robust label equality for mixed dtypes / categoricals."""
+    # Most of the time plain equality is fine; fallback to string compare.
+    try:
+        return a == b
+    except Exception:
+        return str(a) == str(b)
+
+def _pil_desaturate_and_whiten(rgba_img: Image.Image, desaturate=0.85, whiten=0.35) -> Image.Image:
+    """
+    Make an RGBA image look 'faded':
+      - desaturate in [0,1]: 0 = keep color, 1 = fully grayscale
+      - whiten in [0,1]: 0 = no whitening, 1 = fully white
+    """
+    if rgba_img.mode != "RGBA":
+        rgba_img = rgba_img.convert("RGBA")
+
+    rgb = rgba_img.convert("RGB")
+
+    # 1) desaturate
+    # Color factor: 1 -> original, 0 -> grayscale
+    color_factor = max(0.0, min(1.0, 1.0 - float(desaturate)))
+    rgb_desat = ImageEnhance.Color(rgb).enhance(color_factor)
+
+    # 2) blend toward white
+    whiten = max(0.0, min(1.0, float(whiten)))
+    white = Image.new("RGB", rgb_desat.size, (255, 255, 255))
+    rgb_faded = Image.blend(rgb_desat, white, whiten)
+
+    # restore alpha from original
+    a = rgba_img.split()[-1]
+    out = rgb_faded.convert("RGBA")
+    out.putalpha(a)
+    return out
 
 # ---------------------------------------------------------------------
 # 1. Stitch HoVer-Net JSON tiles -> whole-slide coordinates
@@ -520,6 +587,243 @@ def plot_clusters_on_cell_masks(
         formats=out_formats,
         dpi=dpi,
         face_rgb01=bg_rgb01,
+    )
+
+    del he_img
+    gc.collect()
+    return saved_paths
+
+
+def plot_selected_cluster_mask_on_he(
+    sample,
+    he_path,
+    hovernet_json_dir,
+    save_dir,
+    selected_cluster,                 # <-- user-selected cluster label/value
+    minimal_h5ad_path=None,
+    coords=None,
+    labels=None,
+    cluster_key="hier_kmeans",
+    vis_basis="spatial",
+    spatial_scale_factor=16.0,
+    max_match_dist_px=None,
+
+    # ---- display controls ----
+    downsample_factor=0.25,           # strongly recommended < 1 for WSI
+    mode="masked",                    # "masked" or "boundaries"
+    masked_background=(0, 0, 0),      # background for masked mode (outside cluster cells)
+    draw_boundaries=True,             # relevant for mode="boundaries"
+    boundary_color=(255, 0, 0),
+    boundary_width_px=2,
+
+    # optional translucent fill on top of H&E (useful in boundaries mode)
+    fill_cells=False,
+    fill_color=(255, 0, 0),
+    fill_alpha=80,                    # 0-255
+
+    # H&E background style (only for masked mode; boundaries mode always shows full H&E):
+    background_style="solid",          # "solid" or "he_faded"
+    outside_color=(0, 0, 0),           # used if background_style="solid"
+    fade_desaturate=0.85,              # used if background_style="he_faded"
+    fade_whiten=0.35,                  # used if background_style="he_faded"
+
+    # ---- saving ----
+    out_formats=("png",),
+    dpi=200,
+):
+    """
+    After assigning cluster labels to nuclei/cells, plot ONLY the selected cluster's
+    cell mask on top of H&E.
+
+    Modes
+    -----
+    mode="masked":
+        Show ONLY H&E pixels covered by the selected cluster's cells.
+        Everything else is `masked_background`.
+
+    mode="boundaries":
+        Show ALL H&E, and overlay cell boundaries (and optional translucent fill)
+        for cells in the selected cluster.
+
+    Returns
+    -------
+    saved_paths : list[str]
+    """
+    if not (0 < downsample_factor <= 1.0):
+        raise ValueError(f"downsample_factor must be in (0,1], got {downsample_factor}")
+    if mode not in ("masked", "boundaries"):
+        raise ValueError("mode must be either 'masked' or 'boundaries'")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    print(f"\n=== Processing sample (H&E overlay): {sample} ===")
+    print(f"  H&E path:        {he_path}")
+    print(f"  JSON dir:        {hovernet_json_dir}")
+    print(f"  Save dir:        {save_dir}")
+    print(f"  Selected cluster: {selected_cluster!r}")
+    print(f"  Mode:            {mode}")
+    if minimal_h5ad_path is not None:
+        print(f"  Clustering h5ad: {minimal_h5ad_path}")
+    else:
+        print("  Using coords+labels arrays directly (no h5ad).")
+
+    if not os.path.isfile(he_path):
+        raise FileNotFoundError(f"H&E image not found: {he_path}")
+    if not os.path.isdir(hovernet_json_dir):
+        raise FileNotFoundError(f"HoVer-Net JSON dir not found: {hovernet_json_dir}")
+
+    # --- Read H&E with pyvips (full-res for dimensions; we will display downsampled) ---
+    he_img = pyvips.Image.new_from_file(he_path, access="sequential")
+    he_img = _ensure_vips_rgb_u8(he_img)
+    H, W = he_img.height, he_img.width
+    print(f"  Full-resolution H&E size: {W} x {H}")
+
+    # --- clustering coords & labels ---
+    if coords is not None and labels is not None:
+        coords_raw = np.asarray(coords, dtype=np.float32)
+        labels_arr = np.asarray(labels)
+    elif minimal_h5ad_path is not None:
+        if not os.path.isfile(minimal_h5ad_path):
+            raise FileNotFoundError(f"Clustering h5ad not found: {minimal_h5ad_path}")
+        ad = sc.read_h5ad(minimal_h5ad_path)
+        if vis_basis not in ad.obsm_keys():
+            raise KeyError(f"{vis_basis!r} not found in ad.obsm.")
+        if cluster_key not in ad.obs_keys():
+            raise KeyError(f"{cluster_key!r} not found in ad.obs.")
+        coords_raw = ad.obsm[vis_basis].astype(np.float32)
+        labels_arr = ad.obs[cluster_key].to_numpy()
+        del ad
+    else:
+        raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
+
+    # coords_raw ~ (x, y) -> full-res (y, x) in H&E pixels
+    coords_yx_full = np.stack([coords_raw[:, 1], coords_raw[:, 0]], axis=1) * float(spatial_scale_factor)
+
+    # --- nuclei / cells from HoVer-Net JSONs ---
+    print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
+    nuc_centroids_yx, nuc_contours_matrix = load_hovernet_nuclei(hovernet_json_dir)
+    n_nuclei = nuc_centroids_yx.shape[0]
+    print(f"  Nuclei / cells count: {n_nuclei}")
+
+    nuc_polygons_yx = contours_matrix_to_polygons(nuc_contours_matrix, n_nuclei)
+
+    # --- nearest neighbor: assign cluster label to each nucleus centroid ---
+    print("  Building KDTree for clustering coords...")
+    tree = cKDTree(coords_yx_full)
+    print("  Querying nearest clusters for nuclei centroids...")
+    dists, idxs = tree.query(nuc_centroids_yx, k=1)
+
+    nucleus_labels = []
+    for i in range(n_nuclei):
+        if max_match_dist_px is not None and dists[i] > max_match_dist_px:
+            nucleus_labels.append(None)
+        else:
+            nucleus_labels.append(labels_arr[idxs[i]])
+
+    # --- collect polygons for the selected cluster ---
+    selected_nids = [
+        nid for nid, lbl in enumerate(nucleus_labels)
+        if (lbl is not None and _labels_equal(lbl, selected_cluster))
+    ]
+    if not selected_nids:
+        print("  No nuclei matched the selected cluster (nothing to draw).")
+        return []
+
+    print(f"  Cells in selected cluster: {len(selected_nids)}")
+
+    # --- build a downsampled H&E PIL for visualization ---
+    if downsample_factor < 1.0:
+        he_vis = he_img.resize(downsample_factor)
+    else:
+        he_vis = he_img
+
+    he_pil = _vips_to_pil_rgb(he_vis).convert("RGBA")
+    vis_W, vis_H = he_pil.size
+    print(f"  Display size (downsampled): {vis_W} x {vis_H}")
+
+    # Scale factor from full-res polygons to display pixels
+    scale = float(downsample_factor)
+
+    # --- create a mask image for selected cluster (in display resolution) ---
+    mask = Image.new("L", (vis_W, vis_H), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
+    # For boundaries mode, prepare an overlay RGBA for lines/fills
+    overlay = Image.new("RGBA", (vis_W, vis_H), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    for nid in selected_nids:
+        poly_yx = nuc_polygons_yx[nid]
+        if poly_yx.size == 0:
+            continue
+
+        poly_xy = _scale_polygon_xy(poly_yx, scale)
+        if len(poly_xy) < 3:
+            continue
+
+        # Fill mask (used in masked mode, and also optional fill in boundaries mode)
+        mask_draw.polygon(poly_xy, fill=255)
+
+        if mode == "boundaries":
+            if fill_cells:
+                overlay_draw.polygon(
+                    poly_xy,
+                    fill=(int(fill_color[0]), int(fill_color[1]), int(fill_color[2]), int(fill_alpha)),
+                )
+            if draw_boundaries:
+                # Draw polygon outline
+                overlay_draw.line(
+                    poly_xy + [poly_xy[0]],
+                    fill=(int(boundary_color[0]), int(boundary_color[1]), int(boundary_color[2]), 255),
+                    width=int(boundary_width_px),
+                    joint="curve",
+                )
+
+    # --- compose final image ---
+    if mode == "masked":
+        if background_style not in ("solid", "he_faded"):
+            raise ValueError("background_style must be 'solid' or 'he_faded'")
+
+        if background_style == "solid":
+            bg = Image.new(
+                "RGBA",
+                (vis_W, vis_H),
+                (int(outside_color[0]), int(outside_color[1]), int(outside_color[2]), 255),
+            )
+            outside = bg
+            face_rgb01 = (outside_color[0] / 255.0, outside_color[1] / 255.0, outside_color[2] / 255.0)
+
+        else:  # "he_faded"
+            outside = _pil_desaturate_and_whiten(
+                he_pil,
+                desaturate=fade_desaturate,
+                whiten=fade_whiten,
+            )
+            # background is still H&E-ish; white is usually a nice figure canvas
+            face_rgb01 = (1.0, 1.0, 1.0)
+
+        # Inside mask: original H&E; Outside mask: chosen background
+        composed = Image.composite(he_pil, outside, mask)
+
+        out_name = f"he_masked_cluster_{_slug(selected_cluster)}_{background_style}"
+    else:
+        # boundaries: show all H&E + overlay
+        composed = Image.alpha_composite(he_pil, overlay)
+        face_rgb01 = (1.0, 1.0, 1.0)
+        out_name = f"he_boundaries_cluster_{_slug(selected_cluster)}"
+
+    # --- save ---
+    sample_out_dir = os.path.join(save_dir, str(sample), _slug(cluster_key))
+    os.makedirs(sample_out_dir, exist_ok=True)
+    out_base = os.path.join(sample_out_dir, out_name)
+
+    # save with matplotlib for pdf/svg support
+    saved_paths = _save_with_matplotlib(
+        composed.convert("RGB"),
+        out_base=out_base,
+        formats=out_formats,
+        dpi=dpi,
+        face_rgb01=face_rgb01,
     )
 
     del he_img
