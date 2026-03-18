@@ -33,7 +33,7 @@ import gc
 import numpy as np
 import scanpy as sc
 import matplotlib.pyplot as plt
-from matplotlib import cm
+from matplotlib import cm, colors
 
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
@@ -81,11 +81,15 @@ def _add_legend_outside_right_transparent(
     items,
     legend_font_rel=0.04,
     legend_min_font_px=16,
+    text_color=None,
 ):
     """
     Add a transparent legend strip to the RIGHT of the image (top-right aligned).
     items: list[(label, (R,G,B))]
     """
+    if text_color is None:
+        text_color = (255, 255, 255, 255)
+    
     if not items:
         return pil_img
 
@@ -150,7 +154,7 @@ def _add_legend_outside_right_transparent(
         )
         tx = x0 + swatch + gap
         ty = y + max(0, (swatch - text_h) // 2)
-        drawp.text((tx, ty), str(lbl), fill=(0, 0, 0, 255), font=font)
+        drawp.text((tx, ty), str(lbl), fill=text_color, font=font)
         y += row_h
 
     return canvas
@@ -257,6 +261,542 @@ def _pil_desaturate_and_whiten(rgba_img: Image.Image, desaturate=0.85, whiten=0.
     out.putalpha(a)
     return out
 
+def _auto_text_color_for_bg(bg_color, threshold=186):
+    """
+    Return white text for dark backgrounds, black text for light backgrounds.
+
+    bg_color can be:
+      - '#RRGGBB' or '#RGB'
+      - (R,G,B)
+
+    threshold:
+      larger -> more likely to choose white text
+    """
+    rgb = _to_rgb_u8(bg_color).astype(float)
+    r, g, b = rgb
+
+    # perceived brightness
+    brightness = 0.299 * r + 0.587 * g + 0.114 * b
+
+    if brightness < threshold:
+        return (255, 255, 255, 255)  # white
+    else:
+        return (0, 0, 0, 255)        # black
+
+def _save_image(pil_img, out_base, formats, dpi=200, face_rgb01=(1, 1, 1)):
+    saved_paths = []
+
+    for fmt in formats:
+        ext = str(fmt).lower().lstrip(".")
+        out_path = f"{out_base}.{ext}"
+
+        if ext in {"png", "jpg", "jpeg", "tif", "tiff"}:
+            if ext in {"jpg", "jpeg"}:
+                pil_img.convert("RGB").save(out_path, quality=95)
+            else:
+                pil_img.save(out_path, dpi=(dpi, dpi))
+        else:
+            # fallback to matplotlib only for vector or unusual formats
+            _save_with_matplotlib(pil_img, out_base, [ext], dpi, face_rgb01)
+
+        print(f"✅ Saved: {out_path}")
+        saved_paths.append(out_path)
+
+    return saved_paths
+    
+
+def _infer_column_kind(values):
+    """
+    Fallback inference for whether values are categorical or numerical.
+
+    Returns
+    -------
+    kind : str
+        "categorical" or "numerical"
+    """
+    arr = np.asarray(values)
+
+    # multi-dimensional numeric arrays are treated as numerical
+    if arr.ndim > 1:
+        return "numerical"
+
+    # object / string / category-like -> categorical
+    if arr.dtype.kind in {"O", "U", "S"}:
+        return "categorical"
+
+    # numeric -> numerical
+    if np.issubdtype(arr.dtype, np.number):
+        return "numerical"
+
+    # conservative fallback
+    return "categorical"
+
+
+def _resolve_column_kind(user_kind, values, column_name="value"):
+    """
+    Resolve whether the column should be treated as categorical or numerical.
+
+    Parameters
+    ----------
+    user_kind : str or None
+        User-specified kind. Expected: "categorical" or "numerical".
+        If None, use fallback inference.
+    values : array-like
+        The raw values.
+    column_name : str
+        For messages.
+
+    Returns
+    -------
+    kind : str
+        "categorical" or "numerical"
+    """
+    if user_kind is not None:
+        kind = str(user_kind).strip().lower()
+        if kind not in {"categorical", "numerical"}:
+            raise ValueError(
+                f"column_kind must be 'categorical' or 'numerical', got {user_kind!r}"
+            )
+        print(f"  Using user-specified column type for {column_name!r}: {kind}")
+        return kind
+
+    inferred = _infer_column_kind(values)
+    print(f"  Inferred column type for {column_name!r}: {inferred}")
+    return inferred
+
+
+def _load_values_from_h5ad(
+    minimal_h5ad_path,
+    key,
+    vis_basis="spatial",
+    value_index=None,
+):
+    """
+    Load coordinates plus values from h5ad.
+
+    Supports:
+      - ad.obs[key] (1D)
+      - ad.obsm[key] (1D or 2D)
+
+    For 2D numerical arrays in obsm, user can specify value_index.
+    """
+    if not os.path.isfile(minimal_h5ad_path):
+        raise FileNotFoundError(f"Clustering h5ad not found: {minimal_h5ad_path}")
+
+    ad = sc.read_h5ad(minimal_h5ad_path)
+
+    if vis_basis not in ad.obsm_keys():
+        raise KeyError(f"{vis_basis!r} not found in ad.obsm.")
+
+    coords_raw = ad.obsm[vis_basis].astype(np.float32)
+
+    key_in_obs = key in ad.obs_keys()
+    key_in_obsm = key in ad.obsm_keys()
+
+    if not key_in_obs and not key_in_obsm:
+        raise KeyError(f"{key!r} not found in ad.obs or ad.obsm.")
+
+    if key_in_obs:
+        values = ad.obs[key].to_numpy()
+        source = "obs"
+    else:
+        values = np.asarray(ad.obsm[key])
+        source = "obsm"
+
+        if values.ndim == 2:
+            if value_index is None:
+                raise ValueError(
+                    f"{key!r} is 2D in ad.obsm with shape {values.shape}. "
+                    "Please provide value_index to choose which column to plot."
+                )
+            if not (0 <= int(value_index) < values.shape[1]):
+                raise IndexError(
+                    f"value_index={value_index} out of bounds for {key!r} with shape {values.shape}"
+                )
+            values = values[:, int(value_index)]
+
+    del ad
+    gc.collect()
+
+    return coords_raw, np.asarray(values), source
+
+
+def _make_numeric_colorbar_image(
+    cmap_name="viridis",
+    vmin=0.0,
+    vmax=1.0,
+    label="value",
+    width=280,
+    height=80,
+    dpi=200,
+    facecolor="white",
+    text_color="black",
+):
+    """
+    Create a standalone horizontal colorbar as a PIL image.
+    """
+    fig_w = width / float(dpi)
+    fig_h = height / float(dpi)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor(facecolor)
+    ax.set_facecolor(facecolor)
+
+    norm = colors.Normalize(vmin=vmin, vmax=vmax)
+    sm = cm.ScalarMappable(norm=norm, cmap=cm.get_cmap(cmap_name))
+    sm.set_array([])
+
+    cb = fig.colorbar(sm, ax=ax, orientation="horizontal", fraction=0.6, pad=0.35)
+    cb.set_label(label, color=text_color)
+    cb.ax.xaxis.set_tick_params(color=text_color)
+    plt.setp(cb.ax.get_xticklabels(), color=text_color)
+
+    ax.remove()
+    fig.tight_layout(pad=0.5)
+
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+    img = Image.fromarray(buf, mode="RGBA").convert("RGB")
+
+    plt.close(fig)
+    return img
+
+
+def plot_numerical_values_on_cell_masks(
+    sample,
+    he_path,
+    hovernet_json_dir,
+    save_dir,
+    value_key,
+    minimal_h5ad_path=None,
+    coords=None,
+    values=None,
+    value_index=None,
+    column_kind="numerical",          # user-specified; fallback inference if None
+    vis_basis="spatial",
+    spatial_scale_factor=16.0,
+    max_match_dist_px=None,
+    downsample_factor=1.0,
+    background_color=(0, 0, 0),
+    cmap_name="viridis",
+    vmin=None,
+    vmax=None,
+    colorbar_label=None,
+    save_colorbar=True,
+    out_formats=("png",),
+    dpi=200,
+):
+    """
+    Plot numerical values on cell masks using a continuous colormap.
+
+    Typical use cases:
+      - continuous score in ad.obs
+      - one selected column from a 2D matrix in ad.obsm (using value_index)
+      - probabilities such as ad.obsm['cdan_probs'][:, class_idx]
+
+    Parameters
+    ----------
+    value_key : str
+        Column/key to plot from ad.obs or ad.obsm.
+    value_index : int or None
+        Required if value_key in ad.obsm is 2D and you want a specific column.
+    column_kind : {"numerical", "categorical"} or None
+        User-specified type. If None, a fallback inference is used.
+        For this function, resolved type must be numerical.
+    save_colorbar : bool
+        Save a separate colorbar image.
+    """
+    if not (0 < downsample_factor <= 1.0):
+        raise ValueError(
+            f"downsample_factor must be in (0, 1], got {downsample_factor}."
+        )
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    print(f"\n=== Processing numerical overlay for sample: {sample} ===")
+    print(f"  H&E path:        {he_path}")
+    print(f"  JSON dir:        {hovernet_json_dir}")
+    print(f"  Save dir:        {save_dir}")
+    print(f"  Value key:       {value_key}")
+
+    if not os.path.isfile(he_path):
+        raise FileNotFoundError(f"H&E image not found: {he_path}")
+    if not os.path.isdir(hovernet_json_dir):
+        raise FileNotFoundError(f"HoVer-Net JSON dir not found: {hovernet_json_dir}")
+
+    he_img = pyvips.Image.new_from_file(he_path, access="sequential")
+    if he_img.bands > 3:
+        he_img = he_img[0:3]
+    elif he_img.bands == 1:
+        he_img = he_img.bandjoin([he_img, he_img, he_img])
+
+    H, W = he_img.height, he_img.width
+    print(f"  Full-resolution H&E size: {W} x {H}")
+
+    # --- values + coords ---
+    if coords is not None and values is not None:
+        coords_raw = np.asarray(coords, dtype=np.float32)
+        values_arr = np.asarray(values)
+        source = "direct"
+    elif minimal_h5ad_path is not None:
+        coords_raw, values_arr, source = _load_values_from_h5ad(
+            minimal_h5ad_path=minimal_h5ad_path,
+            key=value_key,
+            vis_basis=vis_basis,
+            value_index=value_index,
+        )
+    else:
+        raise ValueError("Provide either minimal_h5ad_path OR coords+values.")
+
+    resolved_kind = _resolve_column_kind(column_kind, values_arr, column_name=value_key)
+    if resolved_kind != "numerical":
+        raise ValueError(
+            f"{value_key!r} resolved to {resolved_kind!r}, but "
+            "plot_numerical_values_on_cell_masks requires numerical values."
+        )
+
+    values_arr = np.asarray(values_arr, dtype=np.float32)
+
+    coords_yx_full = np.stack(
+        [coords_raw[:, 1], coords_raw[:, 0]],
+        axis=1,
+    ) * float(spatial_scale_factor)
+
+    print(f"  Loaded values from: {source}")
+    print(f"  Value array shape: {values_arr.shape}")
+    print(f"  Value dtype:       {values_arr.dtype}")
+
+    print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
+    nuc_centroids_yx, nuc_contours_matrix = load_hovernet_nuclei(hovernet_json_dir)
+    n_nuclei = nuc_centroids_yx.shape[0]
+    print(f"  Nuclei / cells count: {n_nuclei}")
+
+    nuc_polygons_yx = contours_matrix_to_polygons(nuc_contours_matrix, n_nuclei)
+    del nuc_contours_matrix
+    gc.collect()
+
+    print("  Building KDTree for clustering coords...")
+    tree = cKDTree(coords_yx_full)
+    print("  Querying nearest numerical values for nuclei centroids...")
+    dists, idxs = tree.query(nuc_centroids_yx, k=1)
+
+    nucleus_values = np.full(n_nuclei, np.nan, dtype=np.float32)
+    for i in range(n_nuclei):
+        if max_match_dist_px is None or dists[i] <= max_match_dist_px:
+            nucleus_values[i] = values_arr[idxs[i]]
+
+    del coords_raw
+    del coords_yx_full
+    del values_arr
+    del tree
+    del dists
+    del idxs
+    del nuc_centroids_yx
+    gc.collect()
+
+    valid_mask = np.isfinite(nucleus_values)
+    if not np.any(valid_mask):
+        print("  No nuclei could be matched to numerical values (skipping drawing).")
+        return []
+
+    if vmin is None:
+        vmin = float(np.nanmin(nucleus_values))
+    if vmax is None:
+        vmax = float(np.nanmax(nucleus_values))
+    if vmax <= vmin:
+        vmax = vmin + 1e-8
+
+    print(f"  Numerical scale: [{vmin}, {vmax}] using cmap={cmap_name}")
+
+    norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+    cmap = cm.get_cmap(cmap_name)
+
+    bg_rgb = _to_rgb_u8(background_color)
+    bg_rgb01 = _to_rgb01(tuple(int(x) for x in bg_rgb))
+
+    draw_scale = float(downsample_factor)
+    vis_W = max(1, int(round(W * draw_scale)))
+    vis_H = max(1, int(round(H * draw_scale)))
+
+    print(f"  Drawing nuclei / cell polygons at display resolution: {vis_W} x {vis_H}")
+    overlay_img = Image.new("RGB", (vis_W, vis_H), tuple(int(x) for x in bg_rgb.tolist()))
+    draw = ImageDraw.Draw(overlay_img, "RGB")
+
+    for nid in range(n_nuclei):
+        val = nucleus_values[nid]
+        if not np.isfinite(val):
+            continue
+
+        poly_yx = nuc_polygons_yx[nid]
+        if poly_yx.size == 0:
+            continue
+
+        poly_xy = _scale_polygon_xy(poly_yx, draw_scale)
+        if len(poly_xy) < 3:
+            continue
+
+        rgba = cmap(norm(float(val)))
+        col = tuple(int(round(255 * c)) for c in rgba[:3])
+        draw.polygon(poly_xy, fill=col)
+
+    suffix = _slug(value_key)
+    if value_index is not None:
+        suffix = f"{suffix}_idx{int(value_index)}"
+
+    sample_out_dir = os.path.join(save_dir, str(sample), suffix)
+    os.makedirs(sample_out_dir, exist_ok=True)
+
+    out_base = os.path.join(sample_out_dir, "numerical_values_on_cell_masks")
+    saved_paths = _save_image(
+        overlay_img,
+        out_base=out_base,
+        formats=out_formats,
+        dpi=dpi,
+        face_rgb01=bg_rgb01,
+    )
+
+    if save_colorbar:
+        label = colorbar_label if colorbar_label is not None else value_key
+        if value_index is not None:
+            label = f"{label} [col {int(value_index)}]"
+
+        text_color = "white" if _auto_text_color_for_bg(background_color)[:3] == (255, 255, 255) else "black"
+        facecolor = "black" if text_color == "white" else "white"
+
+        cb_img = _make_numeric_colorbar_image(
+            cmap_name=cmap_name,
+            vmin=vmin,
+            vmax=vmax,
+            label=label,
+            dpi=dpi,
+            facecolor=facecolor,
+            text_color=text_color,
+        )
+        cb_base = os.path.join(sample_out_dir, "numerical_values_colorbar")
+        saved_paths.extend(
+            _save_image(
+                cb_img,
+                out_base=cb_base,
+                formats=out_formats,
+                dpi=dpi,
+                face_rgb01=(0, 0, 0) if facecolor == "black" else (1, 1, 1),
+            )
+        )
+
+    del he_img
+    del overlay_img
+    del nuc_polygons_yx
+    del nucleus_values
+    gc.collect()
+    return saved_paths
+
+
+def plot_values_on_cell_masks(
+    sample,
+    he_path,
+    hovernet_json_dir,
+    save_dir,
+    value_key,
+    minimal_h5ad_path=None,
+    coords=None,
+    values=None,
+    labels=None,
+    value_index=None,
+    column_kind=None,                 # "categorical" or "numerical", fallback inference if None
+    vis_basis="spatial",
+    spatial_scale_factor=16.0,
+    max_match_dist_px=None,
+    downsample_factor=1.0,
+    background_color=(0, 0, 0),
+
+    # categorical options
+    label_to_color=None,
+    legend_font_rel=0.025,
+    legend_min_font_px=12,
+
+    # numerical options
+    cmap_name="viridis",
+    vmin=None,
+    vmax=None,
+    colorbar_label=None,
+    save_colorbar=True,
+
+    out_formats=("png",),
+    dpi=200,
+):
+    """
+    Dispatcher that chooses categorical or numerical plotting based on user input,
+    with fallback inference only if column_kind is None.
+    """
+    if coords is None and minimal_h5ad_path is not None:
+        coords_raw, raw_values, source = _load_values_from_h5ad(
+            minimal_h5ad_path=minimal_h5ad_path,
+            key=value_key,
+            vis_basis=vis_basis,
+            value_index=value_index,
+        )
+        del coords_raw
+        gc.collect()
+    elif values is not None:
+        raw_values = values
+    elif labels is not None:
+        raw_values = labels
+    else:
+        raise ValueError(
+            "For dispatcher usage, provide minimal_h5ad_path or raw values/labels."
+        )
+
+    resolved_kind = _resolve_column_kind(column_kind, raw_values, column_name=value_key)
+
+    if resolved_kind == "categorical":
+        return plot_clusters_on_cell_masks(
+            sample=sample,
+            he_path=he_path,
+            hovernet_json_dir=hovernet_json_dir,
+            save_dir=save_dir,
+            minimal_h5ad_path=minimal_h5ad_path,
+            coords=coords,
+            labels=labels if labels is not None else raw_values,
+            cluster_key=value_key,
+            vis_basis=vis_basis,
+            spatial_scale_factor=spatial_scale_factor,
+            max_match_dist_px=max_match_dist_px,
+            downsample_factor=downsample_factor,
+            background_color=background_color,
+            label_to_color=label_to_color,
+            legend_font_rel=legend_font_rel,
+            legend_min_font_px=legend_min_font_px,
+            out_formats=out_formats,
+            dpi=dpi,
+        )
+
+    return plot_numerical_values_on_cell_masks(
+        sample=sample,
+        he_path=he_path,
+        hovernet_json_dir=hovernet_json_dir,
+        save_dir=save_dir,
+        value_key=value_key,
+        minimal_h5ad_path=minimal_h5ad_path,
+        coords=coords,
+        values=values if values is not None else raw_values,
+        value_index=value_index,
+        column_kind=resolved_kind,
+        vis_basis=vis_basis,
+        spatial_scale_factor=spatial_scale_factor,
+        max_match_dist_px=max_match_dist_px,
+        downsample_factor=downsample_factor,
+        background_color=background_color,
+        cmap_name=cmap_name,
+        vmin=vmin,
+        vmax=vmax,
+        colorbar_label=colorbar_label,
+        save_colorbar=save_colorbar,
+        out_formats=out_formats,
+        dpi=dpi,
+    )
+
+
 # ---------------------------------------------------------------------
 # 1. Stitch HoVer-Net JSON tiles -> whole-slide coordinates
 # ---------------------------------------------------------------------
@@ -356,6 +896,7 @@ def load_hovernet_nuclei(json_dir):
     contours_matrix = np.asarray(contours_list, dtype=np.float32)
 
     return centroids_yx, contours_matrix
+
 
 
 def contours_matrix_to_polygons(contours_matrix, n_nuclei):
@@ -468,13 +1009,19 @@ def plot_clusters_on_cell_masks(
             raise FileNotFoundError(f"Clustering h5ad not found: {minimal_h5ad_path}")
 
         ad = sc.read_h5ad(minimal_h5ad_path)
+        cluster_key_in_obs = cluster_key in ad.obs_keys()
+        cluster_key_in_obsm = cluster_key in ad.obsm_keys()
         if vis_basis not in ad.obsm_keys():
             raise KeyError(f"{vis_basis!r} not found in ad.obsm.")
         if cluster_key not in ad.obs_keys():
-            raise KeyError(f"{cluster_key!r} not found in ad.obs.")
+            if cluster_key not in ad.obsm_keys():
+                raise KeyError(f"{cluster_key!r} not found in ad.obs.")
 
         coords_raw = ad.obsm[vis_basis].astype(np.float32)
-        labels = ad.obs[cluster_key].to_numpy()
+        if cluster_key_in_obs:
+            labels = ad.obs[cluster_key].to_numpy()
+        elif cluster_key_in_obsm:
+            labels = ad.obsm[cluster_key].flatten()
         del ad
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
@@ -523,7 +1070,15 @@ def plot_clusters_on_cell_masks(
     if label_to_color is not None:
         for k, col in label_to_color.items():
             label_to_color_final[k] = tuple(_to_rgb_u8(col).tolist())
-
+    
+    # free memory from large arrays we no longer need before drawing
+    del nuc_centroids_scaled
+    del coords_yx_scaled
+    del tree
+    del dists
+    del idxs
+    gc.collect()
+    
     # assign colors for any missing labels
     missing = [lbl for lbl in unique_labels if lbl not in label_to_color_final]
     if missing:
@@ -540,8 +1095,13 @@ def plot_clusters_on_cell_masks(
     bg_rgb = _to_rgb_u8(background_color)
     bg_rgb01 = _to_rgb01(tuple(int(x) for x in bg_rgb))
 
-    print("  Drawing nuclei / cell polygons at full resolution...")
-    overlay_img = Image.new("RGB", (W, H), tuple(int(x) for x in bg_rgb.tolist()))
+    # draw directly at output resolution
+    draw_scale = float(downsample_factor)
+    vis_W = max(1, int(round(W * draw_scale)))
+    vis_H = max(1, int(round(H * draw_scale)))
+
+    print(f"  Drawing nuclei / cell polygons at display resolution: {vis_W} x {vis_H}")
+    overlay_img = Image.new("RGB", (vis_W, vis_H), tuple(int(x) for x in bg_rgb.tolist()))
     draw = ImageDraw.Draw(overlay_img, "RGB")
 
     for nid in range(n_nuclei):
@@ -553,35 +1113,29 @@ def plot_clusters_on_cell_masks(
         if poly_yx.size == 0:
             continue
 
-        # convert (y, x) -> (x, y) for PIL
-        poly_xy = [(float(x), float(y)) for (y, x) in poly_yx]
+        poly_xy = _scale_polygon_xy(poly_yx, draw_scale)
+        if len(poly_xy) < 3:
+            continue
 
         col = label_to_color_final[lbl]
         draw.polygon(poly_xy, fill=(int(col[0]), int(col[1]), int(col[2])))
 
-    # add legend to the right (transparent strip) at full res
-    overlay_with_legend = _add_legend_outside_right_transparent(
+    legend_text_color = _auto_text_color_for_bg(background_color)
+
+    final_img = _add_legend_outside_right_transparent(
         overlay_img,
         legend_items,
         legend_font_rel=legend_font_rel,
         legend_min_font_px=legend_min_font_px,
+        text_color=legend_text_color,
     )
-
-    # --- FINAL DOWNSAMPLE (if requested) ---
-    final_img = overlay_with_legend
-    if downsample_factor < 1.0:
-        W_full, H_full = final_img.size
-        new_W = max(1, int(round(W_full * downsample_factor)))
-        new_H = max(1, int(round(H_full * downsample_factor)))
-        print(f"  Downsampling final image: {W_full}x{H_full} -> {new_W}x{new_H}")
-        final_img = final_img.resize((new_W, new_H), resample=Image.BILINEAR)
 
     # --- save ---
     sample_out_dir = os.path.join(save_dir, str(sample), _slug(cluster_key))
     os.makedirs(sample_out_dir, exist_ok=True)
     out_base = os.path.join(sample_out_dir, "clusters_on_cell_masks")
 
-    saved_paths = _save_with_matplotlib(
+    saved_paths = _save_image(
         final_img,
         out_base=out_base,
         formats=out_formats,
@@ -686,12 +1240,19 @@ def plot_selected_cluster_mask_on_he(
         if not os.path.isfile(minimal_h5ad_path):
             raise FileNotFoundError(f"Clustering h5ad not found: {minimal_h5ad_path}")
         ad = sc.read_h5ad(minimal_h5ad_path)
+        
         if vis_basis not in ad.obsm_keys():
             raise KeyError(f"{vis_basis!r} not found in ad.obsm.")
         if cluster_key not in ad.obs_keys():
-            raise KeyError(f"{cluster_key!r} not found in ad.obs.")
+            if cluster_key not in ad.obsm_keys():
+                raise KeyError(f"{cluster_key!r} not found in ad.obs.")
+        cluster_key_in_obs = cluster_key in ad.obs_keys()
+        cluster_key_in_obsm = cluster_key in ad.obsm_keys()
         coords_raw = ad.obsm[vis_basis].astype(np.float32)
-        labels_arr = ad.obs[cluster_key].to_numpy()
+        if cluster_key_in_obs:
+            labels_arr = ad.obs[cluster_key].to_numpy()
+        elif cluster_key_in_obsm:
+            labels_arr = ad.obsm[cluster_key].flatten()
         del ad
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")

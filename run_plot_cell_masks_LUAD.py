@@ -6,7 +6,7 @@ Edit the paths and mappings in `main()` for your dataset, then run.
 """
 
 import os
-from plot_clusters_on_cell_masks import plot_clusters_on_cell_masks
+from plot_clusters_on_cell_masks import plot_clusters_on_cell_masks, plot_selected_cluster_mask_on_he
 
 
 def main():
@@ -15,14 +15,15 @@ def main():
     # ==========================================================
     sample = "P24_LUAD_Visium" # name of the sample you ran with CATCH
     he_path = f"/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_multi_55_samples/{sample}/he.tiff" # the directory where the raw H&E image is saved
-    hovernet_json_dir = f"/project/CATCH/lexi/hovernet_results/hover_net_out/{sample}/json_expanded" # where the results from the last step (expansion) are
+    #hovernet_json_dir = f"/project/CATCH/lexi/hovernet_results/hover_net_out/{sample}/json_expanded" # where the results from the last step (expansion) are
+    hovernet_json_dir = f"/project/CATCH/lexi/hovernet_results/hover_net_out/{sample}/json" # where the results from the last step (expansion) are
 
     minimal_dir = f"/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_multi_55_samples/{sample}/clustering_result_old" # the clustering_hier_result.h5ad file from CATCH
-    h5ad_filename = "clustering_hier_new_result" # name of the h5ad file (sometimes it's clustering_hier_result, sometimes it's clustering_result)
+    h5ad_filename = "clustering_hier_new_result_merged" # name of the h5ad file (sometimes it's clustering_hier_result, sometimes it's clustering_result)
     minimal_h5ad_path = os.path.join(minimal_dir, f"{h5ad_filename}.h5ad")
 
     save_dir = f"/project/CATCH/lexi/hovernet_results/plots/{sample}" # where you want to save the plots
-    base_cluster_key = "hier_level2_K_2" # which cluster key to plot
+    base_cluster_key = "merged_label" # which cluster key to plot
     
     downsample_factor = 1.0  # the full resolution plot will be the same size as the original H&E. Downsample as needed so as to not fill up the storage space.
 
@@ -55,7 +56,6 @@ def main():
         label_to_color=color_dict, 
         legend_font_rel=0.025,
         legend_min_font_px=12,
-        out_formats="jpg", # change this if you only want one format
         dpi=200,
     )
 
@@ -66,11 +66,10 @@ def main():
         save_dir=save_dir,
         minimal_h5ad_path=minimal_h5ad_path,
         cluster_key=base_cluster_key,
-        selected_cluster=3,
+        selected_cluster=5,
         mode="masked",
         background_style="he_faded",
         downsample_factor=1,
-        out_formats="jpg",
     )
 
 
