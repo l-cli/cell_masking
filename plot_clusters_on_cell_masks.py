@@ -3,24 +3,18 @@
 Utilities to stitch HoVer-Net JSON tiles into whole-slide coordinates and
 plot clustering results restricted to nuclei / cell contours.
 
-Core entrypoint:
+Core entrypoints:
     plot_clusters_on_cell_masks(...)
+    plot_numerical_values_on_cell_masks(...)
+    plot_values_on_cell_masks(...)
+    plot_selected_cluster_mask_on_he(...)
 
 Typical use:
-    from plot_clusters_on_cell_masks import plot_clusters_on_cell_masks
-
-    plot_clusters_on_cell_masks(
-        sample="MySample",
-        he_path="/path/to/he_raw.tif",
-        hovernet_json_dir="/path/to/hover_net_out/MySample/json_expanded",
-        save_dir="/path/to/output/plots",
-        minimal_h5ad_path="/path/to/minimal.h5ad",
-        cluster_key="my_cluster_column",
-        vis_basis="spatial",
-        spatial_scale_factor=16.0,
-        max_match_dist_px=16.0,
-        label_to_color={...},
-        downsample_factor=0.5,
+    from plot_clusters_on_cell_masks import (
+        plot_clusters_on_cell_masks,
+        plot_numerical_values_on_cell_masks,
+        plot_values_on_cell_masks,
+        plot_selected_cluster_mask_on_he,
     )
 """
 
@@ -76,20 +70,121 @@ def _slug(s):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(s))
 
 
+def _get_font(font_px):
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", font_px)
+    except Exception:
+        try:
+            import matplotlib.font_manager as fm
+
+            fpath = fm.findfont("DejaVu Sans", fallback_to_default=True)
+            return ImageFont.truetype(fpath, font_px)
+        except Exception:
+            return ImageFont.load_default()
+
+
+def _text_size_pil(draw, txt, font):
+    try:
+        bbox = draw.textbbox((0, 0), str(txt), font=font)
+        return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    except Exception:
+        return draw.textsize(str(txt), font=font)
+
+
+def _add_title_above_image(
+    pil_img,
+    title,
+    background_color=(255, 255, 255),
+    text_color=(0, 0, 0),
+    title_font_rel=0.035,
+    title_min_font_px=18,
+    title_pad_rel=0.012,
+):
+    """
+    Add a title strip above the image and return the combined image.
+    """
+    if title is None or str(title).strip() == "":
+        return pil_img
+
+    base = pil_img.convert("RGB")
+    W, H = base.size
+
+    font_px = max(int(round(H * float(title_font_rel))), int(title_min_font_px))
+    pad = max(6, int(round(H * float(title_pad_rel))))
+    font = _get_font(font_px)
+
+    tmp = Image.new("RGB", (10, 10), tuple(int(x) for x in background_color))
+    draw_tmp = ImageDraw.Draw(tmp)
+    tw, th = _text_size_pil(draw_tmp, title, font)
+
+    title_h = th + 2 * pad
+
+    canvas = Image.new(
+        "RGB",
+        (W, H + title_h),
+        tuple(int(x) for x in background_color),
+    )
+    canvas.paste(base, (0, title_h))
+
+    draw = ImageDraw.Draw(canvas)
+    tx = max(0, (W - tw) // 2)
+    ty = pad
+    draw.text((tx, ty), str(title), fill=tuple(int(x) for x in text_color), font=font)
+
+    return canvas
+
+
+def _stack_images_vertical(
+    top_img,
+    bottom_img,
+    background_color=(255, 255, 255),
+    gap_px=12,
+    center=True,
+):
+    """
+    Stack two PIL images vertically without cropping.
+    """
+    top = top_img.convert("RGB")
+    bottom = bottom_img.convert("RGB")
+
+    W = max(top.width, bottom.width)
+    H = top.height + gap_px + bottom.height
+
+    canvas = Image.new("RGB", (W, H), tuple(int(x) for x in background_color))
+
+    top_x = (W - top.width) // 2 if center else 0
+    bottom_x = (W - bottom.width) // 2 if center else 0
+
+    canvas.paste(top, (top_x, 0))
+    canvas.paste(bottom, (bottom_x, top.height + gap_px))
+
+    return canvas
+
+
 def _add_legend_outside_right_transparent(
     pil_img,
     items,
     legend_font_rel=0.04,
     legend_min_font_px=16,
     text_color=None,
+    strip_background_color=None,
 ):
     """
-    Add a transparent legend strip to the RIGHT of the image (top-right aligned).
-    items: list[(label, (R,G,B))]
+    Add a legend strip to the RIGHT of the image (top-right aligned).
+
+    Parameters
+    ----------
+    pil_img : PIL.Image
+    items : list[(label, (R,G,B))]
+    text_color : RGBA tuple or None
+    strip_background_color : None or RGB/RGBA tuple
+        If None, the strip stays transparent.
+        If provided, the strip background is filled with this color so it matches
+        the overall plot background.
     """
     if text_color is None:
         text_color = (255, 255, 255, 255)
-    
+
     if not items:
         return pil_img
 
@@ -100,28 +195,14 @@ def _add_legend_outside_right_transparent(
     swatch = max(12, int(round(text_px * 0.9)))
     gap = max(6, int(round(text_px * 0.5)))
     line_gap = max(3, int(round(text_px * 0.3)))
-    box_pad = max(8, int(round(text_px * 0.6)))   # internal padding
-    strip_pad = max(8, int(round(text_px * 0.6))) # from image edge
+    box_pad = max(8, int(round(text_px * 0.6)))
+    strip_pad = max(8, int(round(text_px * 0.6)))
 
-    # font
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", text_px)
-    except Exception:
-        try:
-            import matplotlib.font_manager as fm
-            fpath = fm.findfont("DejaVu Sans", fallback_to_default=True)
-            font = ImageFont.truetype(fpath, text_px)
-        except Exception:
-            font = ImageFont.load_default()
-
+    font = _get_font(text_px)
     draw_base = ImageDraw.Draw(base)
 
     def _text_size(txt):
-        try:
-            bbox = draw_base.textbbox((0, 0), str(txt), font=font)
-            return (bbox[2] - bbox[0], bbox[3] - bbox[1])
-        except Exception:
-            return draw_base.textsize(str(txt), font=font)
+        return _text_size_pil(draw_base, txt, font)
 
     widths, heights = zip(*(_text_size(lbl) for lbl, _ in items)) if items else ([40], [text_px])
     text_h = max(heights) if heights else text_px
@@ -132,16 +213,22 @@ def _add_legend_outside_right_transparent(
     legend_w = box_pad * 2 + content_w
     legend_h = box_pad * 2 + content_h
 
-    # transparent canvas
     strip_w = strip_pad * 2 + legend_w
     new_W = W + strip_w
     new_H = max(H, strip_pad * 2 + legend_h)
-    canvas = Image.new("RGBA", (new_W, new_H), (0, 0, 0, 0))
+
+    if strip_background_color is None:
+        canvas = Image.new("RGBA", (new_W, new_H), (0, 0, 0, 0))
+    else:
+        bg = tuple(int(x) for x in strip_background_color)
+        if len(bg) == 3:
+            bg = bg + (255,)
+        canvas = Image.new("RGBA", (new_W, new_H), bg)
+
     canvas.alpha_composite(base, (0, 0))
 
     drawp = ImageDraw.Draw(canvas, "RGBA")
 
-    # legend origin: top-right inside the transparent strip
     x0 = W + strip_pad + box_pad
     y0 = strip_pad + box_pad
 
@@ -201,7 +288,6 @@ def _ensure_vips_rgb_u8(vimg: "pyvips.Image") -> "pyvips.Image":
     elif vimg.bands == 1:
         vimg = vimg.bandjoin([vimg, vimg, vimg])
 
-    # Convert to uchar if needed
     if vimg.format != "uchar":
         vimg = vimg.cast("uchar")
     return vimg
@@ -222,17 +308,16 @@ def _scale_polygon_xy(poly_yx: np.ndarray, scale: float):
     """
     if poly_yx.size == 0:
         return []
-    # (y,x) -> (x,y), scaled
     return [(float(x) * scale, float(y) * scale) for (y, x) in poly_yx]
 
 
 def _labels_equal(a, b) -> bool:
     """Robust label equality for mixed dtypes / categoricals."""
-    # Most of the time plain equality is fine; fallback to string compare.
     try:
         return a == b
     except Exception:
         return str(a) == str(b)
+
 
 def _pil_desaturate_and_whiten(rgba_img: Image.Image, desaturate=0.85, whiten=0.35) -> Image.Image:
     """
@@ -245,43 +330,32 @@ def _pil_desaturate_and_whiten(rgba_img: Image.Image, desaturate=0.85, whiten=0.
 
     rgb = rgba_img.convert("RGB")
 
-    # 1) desaturate
-    # Color factor: 1 -> original, 0 -> grayscale
     color_factor = max(0.0, min(1.0, 1.0 - float(desaturate)))
     rgb_desat = ImageEnhance.Color(rgb).enhance(color_factor)
 
-    # 2) blend toward white
     whiten = max(0.0, min(1.0, float(whiten)))
     white = Image.new("RGB", rgb_desat.size, (255, 255, 255))
     rgb_faded = Image.blend(rgb_desat, white, whiten)
 
-    # restore alpha from original
     a = rgba_img.split()[-1]
     out = rgb_faded.convert("RGBA")
     out.putalpha(a)
     return out
 
+
 def _auto_text_color_for_bg(bg_color, threshold=186):
     """
     Return white text for dark backgrounds, black text for light backgrounds.
-
-    bg_color can be:
-      - '#RRGGBB' or '#RGB'
-      - (R,G,B)
-
-    threshold:
-      larger -> more likely to choose white text
     """
     rgb = _to_rgb_u8(bg_color).astype(float)
     r, g, b = rgb
-
-    # perceived brightness
     brightness = 0.299 * r + 0.587 * g + 0.114 * b
 
     if brightness < threshold:
-        return (255, 255, 255, 255)  # white
+        return (255, 255, 255, 255)
     else:
-        return (0, 0, 0, 255)        # black
+        return (0, 0, 0, 255)
+
 
 def _save_image(pil_img, out_base, formats, dpi=200, face_rgb01=(1, 1, 1)):
     saved_paths = []
@@ -296,60 +370,35 @@ def _save_image(pil_img, out_base, formats, dpi=200, face_rgb01=(1, 1, 1)):
             else:
                 pil_img.save(out_path, dpi=(dpi, dpi))
         else:
-            # fallback to matplotlib only for vector or unusual formats
             _save_with_matplotlib(pil_img, out_base, [ext], dpi, face_rgb01)
 
         print(f"✅ Saved: {out_path}")
         saved_paths.append(out_path)
 
     return saved_paths
-    
+
 
 def _infer_column_kind(values):
     """
     Fallback inference for whether values are categorical or numerical.
-
-    Returns
-    -------
-    kind : str
-        "categorical" or "numerical"
     """
     arr = np.asarray(values)
 
-    # multi-dimensional numeric arrays are treated as numerical
     if arr.ndim > 1:
         return "numerical"
 
-    # object / string / category-like -> categorical
     if arr.dtype.kind in {"O", "U", "S"}:
         return "categorical"
 
-    # numeric -> numerical
     if np.issubdtype(arr.dtype, np.number):
         return "numerical"
 
-    # conservative fallback
     return "categorical"
 
 
 def _resolve_column_kind(user_kind, values, column_name="value"):
     """
     Resolve whether the column should be treated as categorical or numerical.
-
-    Parameters
-    ----------
-    user_kind : str or None
-        User-specified kind. Expected: "categorical" or "numerical".
-        If None, use fallback inference.
-    values : array-like
-        The raw values.
-    column_name : str
-        For messages.
-
-    Returns
-    -------
-    kind : str
-        "categorical" or "numerical"
     """
     if user_kind is not None:
         kind = str(user_kind).strip().lower()
@@ -426,33 +475,30 @@ def _make_numeric_colorbar_image(
     vmin=0.0,
     vmax=1.0,
     label="value",
-    width=280,
-    height=80,
+    width=1200,
+    height=180,
     dpi=200,
     facecolor="white",
     text_color="black",
 ):
     """
     Create a standalone horizontal colorbar as a PIL image.
+    Sized generously to avoid clipping.
     """
     fig_w = width / float(dpi)
     fig_h = height / float(dpi)
 
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-    fig.patch.set_facecolor(facecolor)
-    ax.set_facecolor(facecolor)
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor=facecolor)
+    ax = fig.add_axes([0.08, 0.45, 0.84, 0.22])
 
     norm = colors.Normalize(vmin=vmin, vmax=vmax)
     sm = cm.ScalarMappable(norm=norm, cmap=cm.get_cmap(cmap_name))
     sm.set_array([])
 
-    cb = fig.colorbar(sm, ax=ax, orientation="horizontal", fraction=0.6, pad=0.35)
+    cb = fig.colorbar(sm, cax=ax, orientation="horizontal")
     cb.set_label(label, color=text_color)
-    cb.ax.xaxis.set_tick_params(color=text_color)
-    plt.setp(cb.ax.get_xticklabels(), color=text_color)
-
-    ax.remove()
-    fig.tight_layout(pad=0.5)
+    cb.ax.xaxis.set_tick_params(color=text_color, labelcolor=text_color)
+    cb.outline.set_edgecolor(text_color)
 
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
@@ -461,6 +507,129 @@ def _make_numeric_colorbar_image(
 
     plt.close(fig)
     return img
+
+
+# ---------------------------------------------------------------------
+# 1. Stitch HoVer-Net JSON tiles -> whole-slide coordinates
+# ---------------------------------------------------------------------
+
+_TILE_RE = re.compile(r"y(\d+)_x(\d+)", re.IGNORECASE)
+
+
+def _parse_tile_origin_from_filename(fname):
+    """
+    Given '.../y00001280_x00001536.json', return (tile_y0, tile_x0) as ints.
+
+    Matches the mask stitching convention:
+        y0 = vertical offset (top row of tile)
+        x0 = horizontal offset (left column of tile)
+    """
+    base = os.path.basename(fname)
+    m = _TILE_RE.search(base)
+    if not m:
+        raise ValueError(f"Cannot parse tile origin from filename: {fname}")
+    tile_y0 = int(m.group(1))
+    tile_x0 = int(m.group(2))
+    return tile_y0, tile_x0
+
+
+def load_hovernet_nuclei(json_dir):
+    """
+    Load all HoVer-Net tile JSONs in `json_dir` and stitch coordinates
+    back into whole-slide image space.
+
+    Conventions:
+      - Filenames: yYYYY_xXXXX.json
+            * YYYY = top (row, y) of tile in WSI space
+            * XXXX = left (column, x) of tile in WSI space
+      - Within JSON per nucleus:
+            * 'centroid': [x, y] in tile-local coordinates
+            * 'contour':  [[x, y], ...] in tile-local coordinates
+
+      - Global mapping:
+            Y_global = tile_y0 + y_local
+            X_global = tile_x0 + x_local
+
+    Returns
+    -------
+    centroids_yx : (N, 2) float32
+        Global centroids (y, x).
+    contours_matrix : (P, 3) float32
+        Rows: (nucleus_id, y, x).
+    """
+    json_paths = sorted(glob.glob(os.path.join(json_dir, "y*_x*.json")))
+    if not json_paths:
+        raise FileNotFoundError(f"No HoVer-Net JSON tiles found in {json_dir}")
+
+    centroids_list = []
+    contours_list = []
+
+    for jp in json_paths:
+        tile_y0, tile_x0 = _parse_tile_origin_from_filename(jp)
+
+        with open(jp, "r") as f:
+            data = json.load(f)
+
+        nuc_dict = data.get("nuc", {})
+
+        for k, ninfo in sorted(
+            nuc_dict.items(),
+            key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0],
+        ):
+            centroid = ninfo.get("centroid", None)
+            contour = ninfo.get("contour", None)
+            if centroid is None or contour is None:
+                continue
+
+            x_local = float(centroid[0])
+            y_local = float(centroid[1])
+
+            Xg = tile_x0 + x_local
+            Yg = tile_y0 + y_local
+
+            nuc_id = len(centroids_list)
+            centroids_list.append([Yg, Xg])
+
+            for pt in contour:
+                x_l = float(pt[0])
+                y_l = float(pt[1])
+
+                Xp = tile_x0 + x_l
+                Yp = tile_y0 + y_l
+
+                contours_list.append([nuc_id, Yp, Xp])
+
+    centroids_yx = np.asarray(centroids_list, dtype=np.float32)
+    contours_matrix = np.asarray(contours_list, dtype=np.float32)
+
+    return centroids_yx, contours_matrix
+
+
+def contours_matrix_to_polygons(contours_matrix, n_nuclei):
+    """
+    Convert contours_matrix (nucleus_id, y, x) to a list of polygons.
+
+    Returns
+    -------
+    polygons_yx : list of (Mi, 2) arrays
+        polygons_yx[i] has rows (y, x) for nucleus i.
+    """
+    polygons = [[] for _ in range(n_nuclei)]
+    for nid, y, x in contours_matrix:
+        nid_int = int(nid)
+        if 0 <= nid_int < n_nuclei:
+            polygons[nid_int].append((float(y), float(x)))
+
+    polygons_yx = [
+        np.asarray(poly, dtype=np.float32) if poly else np.empty((0, 2), dtype=np.float32)
+        for poly in polygons
+    ]
+    return polygons_yx
+
+
+# ---------------------------------------------------------------------
+# 2. Plot values using nuclei/cell contours as masks (single sample)
+# ---------------------------------------------------------------------
 
 
 def plot_numerical_values_on_cell_masks(
@@ -473,7 +642,7 @@ def plot_numerical_values_on_cell_masks(
     coords=None,
     values=None,
     value_index=None,
-    column_kind="numerical",          # user-specified; fallback inference if None
+    column_kind="numerical",
     vis_basis="spatial",
     spatial_scale_factor=16.0,
     max_match_dist_px=None,
@@ -484,6 +653,7 @@ def plot_numerical_values_on_cell_masks(
     vmax=None,
     colorbar_label=None,
     save_colorbar=True,
+    plot_title=None,
     out_formats=("png",),
     dpi=200,
 ):
@@ -494,18 +664,6 @@ def plot_numerical_values_on_cell_masks(
       - continuous score in ad.obs
       - one selected column from a 2D matrix in ad.obsm (using value_index)
       - probabilities such as ad.obsm['cdan_probs'][:, class_idx]
-
-    Parameters
-    ----------
-    value_key : str
-        Column/key to plot from ad.obs or ad.obsm.
-    value_index : int or None
-        Required if value_key in ad.obsm is 2D and you want a specific column.
-    column_kind : {"numerical", "categorical"} or None
-        User-specified type. If None, a fallback inference is used.
-        For this function, resolved type must be numerical.
-    save_colorbar : bool
-        Save a separate colorbar image.
     """
     if not (0 < downsample_factor <= 1.0):
         raise ValueError(
@@ -534,7 +692,6 @@ def plot_numerical_values_on_cell_masks(
     H, W = he_img.height, he_img.width
     print(f"  Full-resolution H&E size: {W} x {H}")
 
-    # --- values + coords ---
     if coords is not None and values is not None:
         coords_raw = np.asarray(coords, dtype=np.float32)
         values_arr = np.asarray(values)
@@ -647,45 +804,57 @@ def plot_numerical_values_on_cell_masks(
     sample_out_dir = os.path.join(save_dir, str(sample), suffix)
     os.makedirs(sample_out_dir, exist_ok=True)
 
-    out_base = os.path.join(sample_out_dir, "numerical_values_on_cell_masks")
+    title_label = colorbar_label if colorbar_label is not None else value_key
+    title_text = plot_title if plot_title is not None else f"{value_key}_{title_label}"
+
+    title_text_rgb = _auto_text_color_for_bg(background_color)[:3]
+    bg_rgb_tuple = tuple(int(x) for x in bg_rgb.tolist())
+
+    combined_img = overlay_img
+
+    if save_colorbar:
+        cb_label = colorbar_label if colorbar_label is not None else value_key
+        cb_img = _make_numeric_colorbar_image(
+            cmap_name=cmap_name,
+            vmin=vmin,
+            vmax=vmax,
+            label=cb_label,
+            width=max(900, overlay_img.width),
+            height=180,
+            dpi=dpi,
+            facecolor="black" if title_text_rgb == (255, 255, 255) else "white",
+            text_color="white" if title_text_rgb == (255, 255, 255) else "black",
+        )
+        combined_img = _stack_images_vertical(
+            combined_img,
+            cb_img,
+            background_color=bg_rgb_tuple,
+            gap_px=max(12, overlay_img.height // 100),
+            center=True,
+        )
+
+    combined_img = _add_title_above_image(
+        combined_img,
+        title=title_text,
+        background_color=bg_rgb_tuple,
+        text_color=title_text_rgb,
+    )
+
+    safe_name = _slug(title_text)
+    out_base = os.path.join(sample_out_dir, safe_name)
+
     saved_paths = _save_image(
-        overlay_img,
+        combined_img,
         out_base=out_base,
         formats=out_formats,
         dpi=dpi,
         face_rgb01=bg_rgb01,
     )
 
-    if save_colorbar:
-        label = colorbar_label if colorbar_label is not None else value_key
-        if value_index is not None:
-            label = f"{label} [col {int(value_index)}]"
-
-        text_color = "white" if _auto_text_color_for_bg(background_color)[:3] == (255, 255, 255) else "black"
-        facecolor = "black" if text_color == "white" else "white"
-
-        cb_img = _make_numeric_colorbar_image(
-            cmap_name=cmap_name,
-            vmin=vmin,
-            vmax=vmax,
-            label=label,
-            dpi=dpi,
-            facecolor=facecolor,
-            text_color=text_color,
-        )
-        cb_base = os.path.join(sample_out_dir, "numerical_values_colorbar")
-        saved_paths.extend(
-            _save_image(
-                cb_img,
-                out_base=cb_base,
-                formats=out_formats,
-                dpi=dpi,
-                face_rgb01=(0, 0, 0) if facecolor == "black" else (1, 1, 1),
-            )
-        )
-
     del he_img
     del overlay_img
+    if "combined_img" in locals():
+        del combined_img
     del nuc_polygons_yx
     del nucleus_values
     gc.collect()
@@ -703,7 +872,7 @@ def plot_values_on_cell_masks(
     values=None,
     labels=None,
     value_index=None,
-    column_kind=None,                 # "categorical" or "numerical", fallback inference if None
+    column_kind=None,
     vis_basis="spatial",
     spatial_scale_factor=16.0,
     max_match_dist_px=None,
@@ -714,6 +883,7 @@ def plot_values_on_cell_masks(
     label_to_color=None,
     legend_font_rel=0.025,
     legend_min_font_px=12,
+    plot_title=None,
 
     # numerical options
     cmap_name="viridis",
@@ -730,7 +900,7 @@ def plot_values_on_cell_masks(
     with fallback inference only if column_kind is None.
     """
     if coords is None and minimal_h5ad_path is not None:
-        coords_raw, raw_values, source = _load_values_from_h5ad(
+        coords_raw, raw_values, _source = _load_values_from_h5ad(
             minimal_h5ad_path=minimal_h5ad_path,
             key=value_key,
             vis_basis=vis_basis,
@@ -767,6 +937,7 @@ def plot_values_on_cell_masks(
             label_to_color=label_to_color,
             legend_font_rel=legend_font_rel,
             legend_min_font_px=legend_min_font_px,
+            plot_title=plot_title if plot_title is not None else str(value_key),
             out_formats=out_formats,
             dpi=dpi,
         )
@@ -792,138 +963,10 @@ def plot_values_on_cell_masks(
         vmax=vmax,
         colorbar_label=colorbar_label,
         save_colorbar=save_colorbar,
+        plot_title=plot_title,
         out_formats=out_formats,
         dpi=dpi,
     )
-
-
-# ---------------------------------------------------------------------
-# 1. Stitch HoVer-Net JSON tiles -> whole-slide coordinates
-# ---------------------------------------------------------------------
-
-_TILE_RE = re.compile(r"y(\d+)_x(\d+)", re.IGNORECASE)
-
-
-def _parse_tile_origin_from_filename(fname):
-    """
-    Given '.../y00001280_x00001536.json', return (tile_y0, tile_x0) as ints.
-
-    Matches the mask stitching convention:
-        y0 = vertical offset (top row of tile)
-        x0 = horizontal offset (left column of tile)
-    """
-    base = os.path.basename(fname)
-    m = _TILE_RE.search(base)
-    if not m:
-        raise ValueError(f"Cannot parse tile origin from filename: {fname}")
-    tile_y0 = int(m.group(1))
-    tile_x0 = int(m.group(2))
-    return tile_y0, tile_x0
-
-
-def load_hovernet_nuclei(json_dir):
-    """
-    Load all HoVer-Net tile JSONs in `json_dir` and stitch coordinates
-    back into whole-slide image space.
-
-    Conventions:
-      - Filenames: yYYYY_xXXXX.json
-            * YYYY = top (row, y) of tile in WSI space
-            * XXXX = left (column, x) of tile in WSI space
-      - Within JSON per nucleus:
-            * 'centroid': [x, y] in tile-local coordinates
-            * 'contour':  [[x, y], ...] in tile-local coordinates
-
-      - Global mapping:
-            Y_global = tile_y0 + y_local
-            X_global = tile_x0 + x_local
-
-    Returns
-    -------
-    centroids_yx : (N, 2) float32
-        Global centroids (y, x).
-    contours_matrix : (P, 3) float32
-        Rows: (nucleus_id, y, x).
-    """
-    json_paths = sorted(
-        glob.glob(os.path.join(json_dir, "y*_x*.json"))
-    )
-    if not json_paths:
-        raise FileNotFoundError(f"No HoVer-Net JSON tiles found in {json_dir}")
-
-    centroids_list = []
-    contours_list = []
-
-    for jp in json_paths:
-        tile_y0, tile_x0 = _parse_tile_origin_from_filename(jp)
-
-        with open(jp, "r") as f:
-            data = json.load(f)
-
-        nuc_dict = data.get("nuc", {})
-
-        # stable ordering
-        for k, ninfo in sorted(
-            nuc_dict.items(),
-            key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0],
-        ):
-            centroid = ninfo.get("centroid", None)
-            contour = ninfo.get("contour", None)
-            if centroid is None or contour is None:
-                continue
-
-            # centroid: [x, y] tile-local -> global (y, x)
-            x_local = float(centroid[0])
-            y_local = float(centroid[1])
-
-            Xg = tile_x0 + x_local
-            Yg = tile_y0 + y_local
-
-            nuc_id = len(centroids_list)  # 0-based global index
-            centroids_list.append([Yg, Xg])
-
-            # contour: list of [x, y] tile-local
-            for pt in contour:
-                x_l = float(pt[0])
-                y_l = float(pt[1])
-
-                Xp = tile_x0 + x_l
-                Yp = tile_y0 + y_l
-
-                contours_list.append([nuc_id, Yp, Xp])
-
-    centroids_yx = np.asarray(centroids_list, dtype=np.float32)
-    contours_matrix = np.asarray(contours_list, dtype=np.float32)
-
-    return centroids_yx, contours_matrix
-
-
-
-def contours_matrix_to_polygons(contours_matrix, n_nuclei):
-    """
-    Convert contours_matrix (nucleus_id, y, x) to a list of polygons.
-
-    Returns
-    -------
-    polygons_yx : list of (Mi, 2) arrays
-        polygons_yx[i] has rows (y, x) for nucleus i.
-    """
-    polygons = [[] for _ in range(n_nuclei)]
-    for nid, y, x in contours_matrix:
-        nid_int = int(nid)
-        if 0 <= nid_int < n_nuclei:
-            polygons[nid_int].append((float(y), float(x)))
-
-    polygons_yx = [
-        np.asarray(poly, dtype=np.float32) if poly else np.empty((0, 2), dtype=np.float32)
-        for poly in polygons
-    ]
-    return polygons_yx
-
-
-# ---------------------------------------------------------------------
-# 2. Plot clusters using nuclei/cell contours as masks (single sample)
-# ---------------------------------------------------------------------
 
 
 def plot_clusters_on_cell_masks(
@@ -936,34 +979,19 @@ def plot_clusters_on_cell_masks(
     labels=None,
     cluster_key="hier_kmeans",
     vis_basis="spatial",
-    spatial_scale_factor=16.0,   # e.g. Visium 'spatial' -> H&E pixels
-    max_match_dist_px=None,      # nuclei farther than this from any cluster coord are skipped
-    downsample_factor=1.0,       # only used to downsample the *final* image (0 < d <= 1)
+    spatial_scale_factor=16.0,
+    max_match_dist_px=None,
+    downsample_factor=1.0,
     background_color=(0, 0, 0),
-    label_to_color=None,         # optional dict {label -> (R,G,B) or "#RRGGBB"}
+    label_to_color=None,
     legend_font_rel=0.025,
     legend_min_font_px=12,
+    plot_title=None,
     out_formats=("png",),
     dpi=200,
 ):
     """
-    For one sample:
-      1. Load H&E from `he_path` (pyvips) to get dimensions.
-      2. Load nuclei/cell centroids & contours from `hovernet_json_dir`.
-         (This can be *expanded* cell masks if you've run expand_hovernet_cells.py.)
-      3. Load clustering coords & labels either from:
-           - `minimal_h5ad_path` (AnnData with obsm[vis_basis] & obs[cluster_key]), or
-           - `coords` + `labels` arrays (in the same coordinate system).
-      4. Assign each nucleus/cell the cluster label of the nearest clustering coord
-         (in matched pixel space).
-      5. Draw polygons filled by cluster color on a black background.
-      6. Save to:
-           save_dir/<sample>/<cluster_key>/clusters_on_cell_masks.{png,pdf,...}
-
-    Returns
-    -------
-    saved_paths : list of str
-        Paths to all saved figure files.
+    Plot categorical labels on cell masks.
     """
     if not (0 < downsample_factor <= 1.0):
         raise ValueError(
@@ -987,20 +1015,16 @@ def plot_clusters_on_cell_masks(
     if not os.path.isdir(hovernet_json_dir):
         raise FileNotFoundError(f"HoVer-Net JSON dir not found: {hovernet_json_dir}")
 
-    # --- H&E for FULL-RES dimensions only ---
     he_img = pyvips.Image.new_from_file(he_path, access="sequential")
 
-    # enforce 3 bands
     if he_img.bands > 3:
         he_img = he_img[0:3]
     elif he_img.bands == 1:
         he_img = he_img.bandjoin([he_img, he_img, he_img])
 
-    # IMPORTANT: no resize here; we keep full-res dimensions
     H, W = he_img.height, he_img.width
     print(f"  Full-resolution H&E size: {W} x {H}")
 
-    # --- clustering coords & labels ---
     if coords is not None and labels is not None:
         coords_raw = np.asarray(coords, dtype=np.float32)
         labels = np.asarray(labels)
@@ -1026,26 +1050,23 @@ def plot_clusters_on_cell_masks(
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
 
-    # coords_raw ~ (x, y) -> FULL-RES (y, x) in H&E pixels
     coords_yx_full = np.stack(
         [coords_raw[:, 1], coords_raw[:, 0]],
         axis=1,
     ) * float(spatial_scale_factor)
 
-    coords_yx_scaled = coords_yx_full  # no extra scaling here
+    coords_yx_scaled = coords_yx_full
 
-    # --- nuclei / cells from HoVer-Net JSONs ---
     print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
     nuc_centroids_yx, nuc_contours_matrix = load_hovernet_nuclei(hovernet_json_dir)
     n_nuclei = nuc_centroids_yx.shape[0]
     print(f"  Nuclei / cells count: {n_nuclei}")
 
-    nuc_centroids_scaled = nuc_centroids_yx  # already in full-res coords
-    nuc_polygons_yx = contours_matrix_to_polygons(
-        nuc_contours_matrix, n_nuclei
-    )
+    nuc_centroids_scaled = nuc_centroids_yx
+    nuc_polygons_yx = contours_matrix_to_polygons(nuc_contours_matrix, n_nuclei)
+    del nuc_contours_matrix
+    gc.collect()
 
-    # --- nearest neighbor: assign cluster label to each nucleus centroid ---
     print("  Building KDTree for clustering coords...")
     tree = cKDTree(coords_yx_scaled)
     print("  Querying nearest clusters for nuclei centroids...")
@@ -1058,7 +1079,6 @@ def plot_clusters_on_cell_masks(
         else:
             nucleus_labels.append(labels[idxs[i]])
 
-    # --- build color mapping ---
     label_vals = [lbl for lbl in nucleus_labels if lbl is not None]
     if not label_vals:
         print("  No nuclei could be matched to cluster coordinates (skipping drawing).")
@@ -1070,16 +1090,15 @@ def plot_clusters_on_cell_masks(
     if label_to_color is not None:
         for k, col in label_to_color.items():
             label_to_color_final[k] = tuple(_to_rgb_u8(col).tolist())
-    
-    # free memory from large arrays we no longer need before drawing
+
     del nuc_centroids_scaled
     del coords_yx_scaled
     del tree
     del dists
     del idxs
+    del nuc_centroids_yx
     gc.collect()
-    
-    # assign colors for any missing labels
+
     missing = [lbl for lbl in unique_labels if lbl not in label_to_color_final]
     if missing:
         cmap = cm.get_cmap("tab20")
@@ -1091,11 +1110,9 @@ def plot_clusters_on_cell_masks(
 
     legend_items = [(lbl, label_to_color_final[lbl]) for lbl in unique_labels]
 
-    # --- draw polygons on black at FULL resolution ---
     bg_rgb = _to_rgb_u8(background_color)
     bg_rgb01 = _to_rgb01(tuple(int(x) for x in bg_rgb))
 
-    # draw directly at output resolution
     draw_scale = float(downsample_factor)
     vis_W = max(1, int(round(W * draw_scale)))
     vis_H = max(1, int(round(H * draw_scale)))
@@ -1128,12 +1145,21 @@ def plot_clusters_on_cell_masks(
         legend_font_rel=legend_font_rel,
         legend_min_font_px=legend_min_font_px,
         text_color=legend_text_color,
+        strip_background_color=tuple(int(x) for x in bg_rgb.tolist()),
     )
 
-    # --- save ---
+    title_text = plot_title if plot_title is not None else str(cluster_key)
+    title_text_color = _auto_text_color_for_bg(background_color)[:3]
+    final_img = _add_title_above_image(
+        final_img,
+        title=title_text,
+        background_color=tuple(int(x) for x in bg_rgb.tolist()),
+        text_color=title_text_color,
+    )
+
     sample_out_dir = os.path.join(save_dir, str(sample), _slug(cluster_key))
     os.makedirs(sample_out_dir, exist_ok=True)
-    out_base = os.path.join(sample_out_dir, "clusters_on_cell_masks")
+    out_base = os.path.join(sample_out_dir, _slug(title_text))
 
     saved_paths = _save_image(
         final_img,
@@ -1144,6 +1170,10 @@ def plot_clusters_on_cell_masks(
     )
 
     del he_img
+    del overlay_img
+    del final_img
+    del nuc_polygons_yx
+    del nucleus_labels
     gc.collect()
     return saved_paths
 
@@ -1153,7 +1183,7 @@ def plot_selected_cluster_mask_on_he(
     he_path,
     hovernet_json_dir,
     save_dir,
-    selected_cluster,                 # <-- user-selected cluster label/value
+    selected_cluster,
     minimal_h5ad_path=None,
     coords=None,
     labels=None,
@@ -1162,26 +1192,22 @@ def plot_selected_cluster_mask_on_he(
     spatial_scale_factor=16.0,
     max_match_dist_px=None,
 
-    # ---- display controls ----
-    downsample_factor=0.25,           # strongly recommended < 1 for WSI
-    mode="masked",                    # "masked" or "boundaries"
-    masked_background=(0, 0, 0),      # background for masked mode (outside cluster cells)
-    draw_boundaries=True,             # relevant for mode="boundaries"
+    downsample_factor=0.25,
+    mode="masked",
+    masked_background=(0, 0, 0),
+    draw_boundaries=True,
     boundary_color=(255, 0, 0),
     boundary_width_px=2,
 
-    # optional translucent fill on top of H&E (useful in boundaries mode)
     fill_cells=False,
     fill_color=(255, 0, 0),
-    fill_alpha=80,                    # 0-255
+    fill_alpha=80,
 
-    # H&E background style (only for masked mode; boundaries mode always shows full H&E):
-    background_style="solid",          # "solid" or "he_faded"
-    outside_color=(0, 0, 0),           # used if background_style="solid"
-    fade_desaturate=0.85,              # used if background_style="he_faded"
-    fade_whiten=0.35,                  # used if background_style="he_faded"
+    background_style="solid",
+    outside_color=(0, 0, 0),
+    fade_desaturate=0.85,
+    fade_whiten=0.35,
 
-    # ---- saving ----
     out_formats=("png",),
     dpi=200,
 ):
@@ -1198,10 +1224,6 @@ def plot_selected_cluster_mask_on_he(
     mode="boundaries":
         Show ALL H&E, and overlay cell boundaries (and optional translucent fill)
         for cells in the selected cluster.
-
-    Returns
-    -------
-    saved_paths : list[str]
     """
     if not (0 < downsample_factor <= 1.0):
         raise ValueError(f"downsample_factor must be in (0,1], got {downsample_factor}")
@@ -1226,13 +1248,11 @@ def plot_selected_cluster_mask_on_he(
     if not os.path.isdir(hovernet_json_dir):
         raise FileNotFoundError(f"HoVer-Net JSON dir not found: {hovernet_json_dir}")
 
-    # --- Read H&E with pyvips (full-res for dimensions; we will display downsampled) ---
     he_img = pyvips.Image.new_from_file(he_path, access="sequential")
     he_img = _ensure_vips_rgb_u8(he_img)
     H, W = he_img.height, he_img.width
     print(f"  Full-resolution H&E size: {W} x {H}")
 
-    # --- clustering coords & labels ---
     if coords is not None and labels is not None:
         coords_raw = np.asarray(coords, dtype=np.float32)
         labels_arr = np.asarray(labels)
@@ -1240,7 +1260,7 @@ def plot_selected_cluster_mask_on_he(
         if not os.path.isfile(minimal_h5ad_path):
             raise FileNotFoundError(f"Clustering h5ad not found: {minimal_h5ad_path}")
         ad = sc.read_h5ad(minimal_h5ad_path)
-        
+
         if vis_basis not in ad.obsm_keys():
             raise KeyError(f"{vis_basis!r} not found in ad.obsm.")
         if cluster_key not in ad.obs_keys():
@@ -1257,18 +1277,17 @@ def plot_selected_cluster_mask_on_he(
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
 
-    # coords_raw ~ (x, y) -> full-res (y, x) in H&E pixels
     coords_yx_full = np.stack([coords_raw[:, 1], coords_raw[:, 0]], axis=1) * float(spatial_scale_factor)
 
-    # --- nuclei / cells from HoVer-Net JSONs ---
     print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
     nuc_centroids_yx, nuc_contours_matrix = load_hovernet_nuclei(hovernet_json_dir)
     n_nuclei = nuc_centroids_yx.shape[0]
     print(f"  Nuclei / cells count: {n_nuclei}")
 
     nuc_polygons_yx = contours_matrix_to_polygons(nuc_contours_matrix, n_nuclei)
+    del nuc_contours_matrix
+    gc.collect()
 
-    # --- nearest neighbor: assign cluster label to each nucleus centroid ---
     print("  Building KDTree for clustering coords...")
     tree = cKDTree(coords_yx_full)
     print("  Querying nearest clusters for nuclei centroids...")
@@ -1281,7 +1300,6 @@ def plot_selected_cluster_mask_on_he(
         else:
             nucleus_labels.append(labels_arr[idxs[i]])
 
-    # --- collect polygons for the selected cluster ---
     selected_nids = [
         nid for nid, lbl in enumerate(nucleus_labels)
         if (lbl is not None and _labels_equal(lbl, selected_cluster))
@@ -1292,7 +1310,6 @@ def plot_selected_cluster_mask_on_he(
 
     print(f"  Cells in selected cluster: {len(selected_nids)}")
 
-    # --- build a downsampled H&E PIL for visualization ---
     if downsample_factor < 1.0:
         he_vis = he_img.resize(downsample_factor)
     else:
@@ -1302,14 +1319,11 @@ def plot_selected_cluster_mask_on_he(
     vis_W, vis_H = he_pil.size
     print(f"  Display size (downsampled): {vis_W} x {vis_H}")
 
-    # Scale factor from full-res polygons to display pixels
     scale = float(downsample_factor)
 
-    # --- create a mask image for selected cluster (in display resolution) ---
     mask = Image.new("L", (vis_W, vis_H), 0)
     mask_draw = ImageDraw.Draw(mask)
 
-    # For boundaries mode, prepare an overlay RGBA for lines/fills
     overlay = Image.new("RGBA", (vis_W, vis_H), (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
 
@@ -1322,7 +1336,6 @@ def plot_selected_cluster_mask_on_he(
         if len(poly_xy) < 3:
             continue
 
-        # Fill mask (used in masked mode, and also optional fill in boundaries mode)
         mask_draw.polygon(poly_xy, fill=255)
 
         if mode == "boundaries":
@@ -1332,7 +1345,6 @@ def plot_selected_cluster_mask_on_he(
                     fill=(int(fill_color[0]), int(fill_color[1]), int(fill_color[2]), int(fill_alpha)),
                 )
             if draw_boundaries:
-                # Draw polygon outline
                 overlay_draw.line(
                     poly_xy + [poly_xy[0]],
                     fill=(int(boundary_color[0]), int(boundary_color[1]), int(boundary_color[2]), 255),
@@ -1340,7 +1352,6 @@ def plot_selected_cluster_mask_on_he(
                     joint="curve",
                 )
 
-    # --- compose final image ---
     if mode == "masked":
         if background_style not in ("solid", "he_faded"):
             raise ValueError("background_style must be 'solid' or 'he_faded'")
@@ -1353,32 +1364,25 @@ def plot_selected_cluster_mask_on_he(
             )
             outside = bg
             face_rgb01 = (outside_color[0] / 255.0, outside_color[1] / 255.0, outside_color[2] / 255.0)
-
-        else:  # "he_faded"
+        else:
             outside = _pil_desaturate_and_whiten(
                 he_pil,
                 desaturate=fade_desaturate,
                 whiten=fade_whiten,
             )
-            # background is still H&E-ish; white is usually a nice figure canvas
             face_rgb01 = (1.0, 1.0, 1.0)
 
-        # Inside mask: original H&E; Outside mask: chosen background
         composed = Image.composite(he_pil, outside, mask)
-
         out_name = f"he_masked_cluster_{_slug(selected_cluster)}_{background_style}"
     else:
-        # boundaries: show all H&E + overlay
         composed = Image.alpha_composite(he_pil, overlay)
         face_rgb01 = (1.0, 1.0, 1.0)
         out_name = f"he_boundaries_cluster_{_slug(selected_cluster)}"
 
-    # --- save ---
     sample_out_dir = os.path.join(save_dir, str(sample), _slug(cluster_key))
     os.makedirs(sample_out_dir, exist_ok=True)
     out_base = os.path.join(sample_out_dir, out_name)
 
-    # save with matplotlib for pdf/svg support
     saved_paths = _save_with_matplotlib(
         composed.convert("RGB"),
         out_base=out_base,
@@ -1388,5 +1392,11 @@ def plot_selected_cluster_mask_on_he(
     )
 
     del he_img
+    del he_pil
+    del mask
+    del overlay
+    del composed
+    del nuc_polygons_yx
+    del nucleus_labels
     gc.collect()
     return saved_paths
