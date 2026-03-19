@@ -6,11 +6,13 @@ set -euo pipefail
 # ==========================================================================================================
 # Change this part to reflect your CATCH result path + where you want to output the masks
 # ==========================================================================================================
-SAMPLE_NAME="P24_LUAD_Visium"
+#SAMPLE_NAME="P24_LUAD_Visium"
+SAMPLE_NAME="luad_shared_with_lexi"
 GPU_ID="0"
 
 # Path to the WSI (H&E) image
-INPUT_IMG="/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_multi_55_samples/${SAMPLE_NAME}/he.tiff"
+#INPUT_IMG="/project/CATCH/xiaokang/CATCH_project_main_result/results/fuduanData_multi_55_samples/${SAMPLE_NAME}/he.tiff"
+INPUT_IMG="/project/CATCH3/liran/luad_shared_with_lexi/he.tiff"
 
 # Where to store tiles + HoVer-Net outputs (json/mat/overlays)
 BASE_OUT_DIR="/project/CATCH/lexi/hovernet_results"

@@ -21,6 +21,7 @@ def main():
     save_dir = f"/project/CATCH/lexi/hovernet_results/plots/{sample}"
     
     downsample_factor = 0.5
+    spatial_xy_order = "xy"
 
     # plot both black and white backgrounds
     background_colors = {
@@ -30,7 +31,7 @@ def main():
     
     for background_name, background_color in background_colors.items():
 
-        save_dir_with_bg = os.path.join(save_dir, background_name)
+        save_dir_with_bg = os.path.join(save_dir, f'{background_name}_bg')
         os.makedirs(save_dir_with_bg, exist_ok=True)
 
         ##########################
@@ -59,6 +60,7 @@ def main():
             cluster_key=base_cluster_key,
             vis_basis="spatial",
             spatial_scale_factor=16.0,
+            spatial_xy_order="xy",
             max_match_dist_px=16.0,
             downsample_factor=downsample_factor,
             background_color=background_color,
@@ -130,6 +132,7 @@ def main():
                 column_kind=column_kind,
                 vis_basis="spatial",
                 spatial_scale_factor=16.0,
+                spatial_xy_order="xy",
                 max_match_dist_px=16.0,
                 downsample_factor=downsample_factor,
                 background_color=background_color,

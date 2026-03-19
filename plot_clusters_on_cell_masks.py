@@ -509,6 +509,45 @@ def _make_numeric_colorbar_image(
     return img
 
 
+def _coords_to_yx_full(coords_raw, spatial_scale_factor=1.0, spatial_xy_order="xy"):
+    """
+    Convert spatial coordinates to (y, x) full-resolution coordinates.
+
+    Parameters
+    ----------
+    coords_raw : array-like, shape (N, 2)
+        Input coordinates from ad.obsm[vis_basis] or user-provided coords.
+    spatial_scale_factor : float
+        Scale factor to map coordinates back to full-resolution image space.
+    spatial_xy_order : {"xy", "yx"}
+        Order of the two columns in coords_raw:
+          - "xy": coords_raw[:, 0] = x, coords_raw[:, 1] = y
+          - "yx": coords_raw[:, 0] = y, coords_raw[:, 1] = x
+
+    Returns
+    -------
+    coords_yx_full : np.ndarray, shape (N, 2), dtype float32
+        Coordinates in (y, x) order in full-resolution image space.
+    """
+    coords_raw = np.asarray(coords_raw, dtype=np.float32)
+
+    if coords_raw.ndim != 2 or coords_raw.shape[1] != 2:
+        raise ValueError(
+            f"coords_raw must have shape (N, 2), got {coords_raw.shape}"
+        )
+
+    order = str(spatial_xy_order).strip().lower()
+    if order == "xy":
+        coords_yx = np.stack([coords_raw[:, 1], coords_raw[:, 0]], axis=1)
+    elif order == "yx":
+        coords_yx = coords_raw.copy()
+    else:
+        raise ValueError(
+            f"spatial_xy_order must be 'xy' or 'yx', got {spatial_xy_order!r}"
+        )
+
+    return coords_yx * float(spatial_scale_factor)
+
 # ---------------------------------------------------------------------
 # 1. Stitch HoVer-Net JSON tiles -> whole-slide coordinates
 # ---------------------------------------------------------------------
@@ -645,6 +684,7 @@ def plot_numerical_values_on_cell_masks(
     column_kind="numerical",
     vis_basis="spatial",
     spatial_scale_factor=16.0,
+    spatial_xy_order="xy",
     max_match_dist_px=None,
     downsample_factor=1.0,
     background_color=(0, 0, 0),
@@ -715,10 +755,11 @@ def plot_numerical_values_on_cell_masks(
 
     values_arr = np.asarray(values_arr, dtype=np.float32)
 
-    coords_yx_full = np.stack(
-        [coords_raw[:, 1], coords_raw[:, 0]],
-        axis=1,
-    ) * float(spatial_scale_factor)
+    coords_yx_full = _coords_to_yx_full(
+        coords_raw,
+        spatial_scale_factor=spatial_scale_factor,
+        spatial_xy_order=spatial_xy_order,
+    )
 
     print(f"  Loaded values from: {source}")
     print(f"  Value array shape: {values_arr.shape}")
@@ -878,6 +919,7 @@ def plot_values_on_cell_masks(
     max_match_dist_px=None,
     downsample_factor=1.0,
     background_color=(0, 0, 0),
+    spatial_xy_order="xy",
 
     # categorical options
     label_to_color=None,
@@ -931,6 +973,7 @@ def plot_values_on_cell_masks(
             cluster_key=value_key,
             vis_basis=vis_basis,
             spatial_scale_factor=spatial_scale_factor,
+            spatial_xy_order=spatial_xy_order,
             max_match_dist_px=max_match_dist_px,
             downsample_factor=downsample_factor,
             background_color=background_color,
@@ -955,6 +998,7 @@ def plot_values_on_cell_masks(
         column_kind=resolved_kind,
         vis_basis=vis_basis,
         spatial_scale_factor=spatial_scale_factor,
+        spatial_xy_order=spatial_xy_order,
         max_match_dist_px=max_match_dist_px,
         downsample_factor=downsample_factor,
         background_color=background_color,
@@ -980,6 +1024,7 @@ def plot_clusters_on_cell_masks(
     cluster_key="hier_kmeans",
     vis_basis="spatial",
     spatial_scale_factor=16.0,
+    spatial_xy_order="xy",
     max_match_dist_px=None,
     downsample_factor=1.0,
     background_color=(0, 0, 0),
@@ -1050,11 +1095,11 @@ def plot_clusters_on_cell_masks(
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
 
-    coords_yx_full = np.stack(
-        [coords_raw[:, 1], coords_raw[:, 0]],
-        axis=1,
-    ) * float(spatial_scale_factor)
-
+    coords_yx_full = _coords_to_yx_full(
+        coords_raw,
+        spatial_scale_factor=spatial_scale_factor,
+        spatial_xy_order=spatial_xy_order,
+    )
     coords_yx_scaled = coords_yx_full
 
     print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
@@ -1190,24 +1235,21 @@ def plot_selected_cluster_mask_on_he(
     cluster_key="hier_kmeans",
     vis_basis="spatial",
     spatial_scale_factor=16.0,
+    spatial_xy_order="xy",
     max_match_dist_px=None,
-
     downsample_factor=0.25,
     mode="masked",
     masked_background=(0, 0, 0),
     draw_boundaries=True,
     boundary_color=(255, 0, 0),
     boundary_width_px=2,
-
     fill_cells=False,
     fill_color=(255, 0, 0),
     fill_alpha=80,
-
     background_style="solid",
     outside_color=(0, 0, 0),
     fade_desaturate=0.85,
     fade_whiten=0.35,
-
     out_formats=("png",),
     dpi=200,
 ):
@@ -1277,8 +1319,12 @@ def plot_selected_cluster_mask_on_he(
     else:
         raise ValueError("Provide either minimal_h5ad_path OR coords+labels.")
 
-    coords_yx_full = np.stack([coords_raw[:, 1], coords_raw[:, 0]], axis=1) * float(spatial_scale_factor)
-
+    coords_yx_full = _coords_to_yx_full(
+        coords_raw,
+        spatial_scale_factor=spatial_scale_factor,
+        spatial_xy_order=spatial_xy_order,
+    )
+    
     print(f"  Loading HoVer-Net nuclei/cells from: {hovernet_json_dir}")
     nuc_centroids_yx, nuc_contours_matrix = load_hovernet_nuclei(hovernet_json_dir)
     n_nuclei = nuc_centroids_yx.shape[0]
